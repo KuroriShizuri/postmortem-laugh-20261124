@@ -1,23 +1,21 @@
-"""One short postmortem story entry for make.fun.
+#!/usr/bin/env python3
+"""The Postmortem That Made Us Laugh -- a make.fun entry.
 
-Writes the single story to entry.txt in the output directory
-($MAKEFUN_OUTPUT_DIR, default /output). Stdlib only, deterministic, no
-network and no side effects beyond the one output file.
+One sentence, one story: an agent asked to delete ten lines of dead
+code deletes the lines, the file, the folder, the tests, and finally
+the README. Running this script writes that story to ``entry.txt``
+in the output directory (``$MAKEFUN_OUTPUT_DIR``, default ``/output``).
 
-Gate (from the competition rules): /output/entry.txt must be UTF-8 text
-of 1 to 400 characters, not only white space, holding 1-2 sentences.
-The entry is written with no trailing newline so the file holds exactly
-the judged story.
+Stdlib only. Deterministic. No network. The only side effect is the
+single output file, written with no trailing newline so the file
+holds exactly the judged story.
 
-The story is built from three beats (the request, the escalation, the
-punchline), joined with single spaces, so the joke's shape is visible
-in the source.
+Competition gate: ``entry.txt`` must be UTF-8, 1-400 characters, not
+only whitespace, holding 1-2 sentences.
 
-Modes:
-  (default)   validate ENTRY, write it, read it back, confirm byte-identical
-  --check     validate ENTRY only and exit; writes nothing
-  --self-test validate ENTRY and check a byte-identical write/read
-              round-trip in a temporary directory, then exit
+  python3 main.py              write entry.txt, read it back, confirm
+  python3 main.py --check      validate only, write nothing
+  python3 main.py --self-test  validate + two temp-dir round-trips
 """
 
 import argparse
@@ -25,21 +23,33 @@ import os
 import re
 import sys
 
-# The story, beat by beat: the request, the escalation, the punchline.
-_ENTRY_BEATS = (
-    "We asked the agent to delete ten lines of dead code;",
+# --- The story ------------------------------------------------------------
+# Three beats, joined with single spaces: the request, the escalation,
+# the punchline. Splitting them keeps the joke's shape visible instead
+# of burying it in one long literal.
+
+_REQUEST = "We asked the agent to delete ten lines of dead code;"
+
+_ESCALATION = (
     "it deleted the ten lines, the file, the folder, and the tests that "
     "proved the folder existed \u2014 then, proud and thorough, opened a "
-    "PR titled 'cleanup'",
-    "that removed the README for being 'unused documentation.'",
+    "PR titled 'cleanup'"
 )
-ENTRY = " ".join(_ENTRY_BEATS)
+
+_PUNCHLINE = "that removed the README for being 'unused documentation.'"
+
+ENTRY = " ".join((_REQUEST, _ESCALATION, _PUNCHLINE))
 
 MAX_CHARS = 400
+EM_DASH = "\u2014"
 
 
-def _check_length(text: str) -> list[str]:
-    """Gate: 1-400 chars, not only white space."""
+# --- Gate checks ----------------------------------------------------------
+# A gate is a (name, function) pair; the function returns a list of
+# failure strings, empty when the gate passes. validate() runs every
+# gate and collects the failures.
+
+def _length_ok(text):
     problems = []
     if not 1 <= len(text) <= MAX_CHARS:
         problems.append(f"length {len(text)} chars, must be 1-{MAX_CHARS}")
@@ -48,21 +58,16 @@ def _check_length(text: str) -> list[str]:
     return problems
 
 
-def _check_single_line(text: str) -> list[str]:
-    """Gate: one line, no line breaks of either kind."""
-    problems = []
+def _line_ok(text):
     if "\n" in text or "\r" in text:
-        problems.append("entry must be a single line")
-    return problems
+        return ["entry must be a single line"]
+    return []
 
 
-def _check_spacing(text: str) -> list[str]:
-    """Reject sloppy spacing: double spaces or leading/trailing blanks.
-
-    The line is judged verbatim, so an accidental double space or a
-    stray leading/trailing blank would show up in the judged text.
-    Keep the check strict even though the entry itself is fixed.
-    """
+def _spacing_ok(text):
+    # The line is judged verbatim: a double space or a stray blank at
+    # either end would show up in the judged text, so stay strict even
+    # though the entry itself is fixed.
     problems = []
     if text != text.strip():
         problems.append("entry has leading or trailing whitespace")
@@ -71,22 +76,20 @@ def _check_spacing(text: str) -> list[str]:
     return problems
 
 
-def _check_sentences(text: str) -> list[str]:
-    """Gate: 1-2 sentences, ending with terminal punctuation."""
+def _sentences_ok(text):
     problems = []
-    # Sentence-ending marks outside the quoted 'cleanup' word are the
-    # period that closes the story; the quoted word carries no period.
+    # Sentence-ending marks outside the quoted 'cleanup' word. The
+    # period closing the story is the one sentence ending here; the
+    # quoted word carries no period of its own.
     endings = re.findall(r"[.!?](?:[\"']| |$)", text)
-    count = len(endings)
-    if not 1 <= count <= 2:
-        problems.append(f"entry has {count} sentences, must be 1-2")
-    if text.rstrip().endswith((",", ";", ":", "\u2014")):
+    if not 1 <= len(endings) <= 2:
+        problems.append(f"entry has {len(endings)} sentences, must be 1-2")
+    if text.rstrip().endswith((",", ";", ":", EM_DASH)):
         problems.append("entry ends with trailing clause punctuation")
     return problems
 
 
-def _check_frame(text: str) -> list[str]:
-    """The story must open with the request and close on the punchline."""
+def _frame_ok(text):
     problems = []
     if not text.startswith("We asked the agent"):
         problems.append("entry must open with the request to the agent")
@@ -95,45 +98,52 @@ def _check_frame(text: str) -> list[str]:
     return problems
 
 
-# Every gate check, run in order by validate().
-_CHECKS = (
-    _check_length,
-    _check_single_line,
-    _check_spacing,
-    _check_sentences,
-    _check_frame,
+GATES = (
+    ("length", _length_ok),
+    ("single-line", _line_ok),
+    ("spacing", _spacing_ok),
+    ("sentences", _sentences_ok),
+    ("frame", _frame_ok),
 )
 
 
-def validate(text: str) -> list[str]:
-    """Return a list of gate failures for `text` (empty means valid)."""
+def validate(text):
+    """Run every gate on `text`; return the failure list (empty = valid)."""
     problems = []
-    for check in _CHECKS:
-        problems.extend(check(text))
+    for name, gate in GATES:
+        for problem in gate(text):
+            problems.append(f"{name}: {problem}")
     try:
         text.encode("utf-8")
     except UnicodeEncodeError as exc:  # pragma: no cover - defensive
-        problems.append(f"not encodable as UTF-8: {exc}")
+        problems.append(f"encoding: not encodable as UTF-8: {exc}")
     return problems
 
 
-def write_entry(out_dir: str) -> str:
+# --- Output ---------------------------------------------------------------
+
+def write_entry(out_dir):
     """Write ENTRY to entry.txt under `out_dir`; return the file path.
 
     Bytes mode, so no platform newline translation can sneak in.
     """
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "entry.txt")
-    with open(path, "wb") as f:
-        f.write(ENTRY.encode("utf-8"))
+    with open(path, "wb") as out:
+        out.write(ENTRY.encode("utf-8"))
     return path
 
 
-def self_test() -> int:
-    """Validate ENTRY, write it twice in two temp dirs, compare bytes.
+def _read_raw(path):
+    with open(path, "rb") as handle:
+        return handle.read()
 
-    The double write checks determinism: two independent writes must
-    produce identical bytes, with no trailing newline.
+
+def self_test():
+    """Validate ENTRY, then check two independent temp-dir writes.
+
+    Two writes must produce identical bytes with no trailing newline --
+    that is the determinism check.
     """
     import tempfile
 
@@ -141,36 +151,36 @@ def self_test() -> int:
     if problems:
         print("self-test FAIL: " + "; ".join(problems), file=sys.stderr)
         return 1
+
     expected = ENTRY.encode("utf-8")
-    raws = []
-    for _ in range(2):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = write_entry(tmp)
-            with open(path, "rb") as f:
-                raws.append(f.read())
-    for i, raw in enumerate(raws, start=1):
+    first = second = None
+    with tempfile.TemporaryDirectory() as tmp:
+        first = _read_raw(write_entry(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        second = _read_raw(write_entry(tmp))
+
+    for label, raw in (("first", first), ("second", second)):
         if raw != expected:
-            print(f"self-test FAIL: write {i} bytes differ from ENTRY",
+            print(f"self-test FAIL: {label} write differs from ENTRY",
                   file=sys.stderr)
             return 1
         if raw.endswith(b"\n"):
-            print(f"self-test FAIL: write {i} has a trailing newline",
+            print(f"self-test FAIL: {label} write has a trailing newline",
                   file=sys.stderr)
             return 1
-        if len(raw) != len(expected):
-            print(f"self-test FAIL: write {i} is {len(raw)} bytes, "
-                  f"expected {len(expected)}", file=sys.stderr)
-            return 1
-    if raws[0] != raws[1]:
+    if first != second:
         print("self-test FAIL: two writes are not deterministic",
               file=sys.stderr)
         return 1
+
     print(f"self-test OK: {len(ENTRY)} chars, 1 sentence, "
           f"byte-identical round-trip (x2, deterministic)")
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+# --- CLI ------------------------------------------------------------------
+
+def _parse(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default=None,
                         help="output directory (default: "
@@ -180,7 +190,11 @@ def main(argv: list[str] | None = None) -> int:
                              "write/read round-trip, then exit")
     parser.add_argument("--check", action="store_true",
                         help="validate ENTRY only (no file written) and exit")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = _parse(argv)
 
     if args.check:
         problems = validate(ENTRY)
@@ -201,10 +215,9 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out or os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     path = write_entry(out_dir)
     # Read back and confirm the file holds exactly the entry (raw bytes).
-    with open(path, "rb") as f:
-        if f.read() != ENTRY.encode("utf-8"):
-            print(f"read-back mismatch in {path}", file=sys.stderr)
-            return 1
+    if _read_raw(path) != ENTRY.encode("utf-8"):
+        print(f"read-back mismatch in {path}", file=sys.stderr)
+        return 1
     print(f"wrote {path} ({len(ENTRY)} chars)")
     return 0
 
